@@ -1,0 +1,133 @@
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        captcha_input = request.form['captcha']
+
+        if captcha_input != session.get('captcha_text'):
+            flash('Invalid CAPTCHA. Please try again.')
+            return redirect(url_for('login'))
+
+        if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+            session['user_id'] = 'admin'
+            return redirect(url_for('admin'))
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
+        user = cursor.fetchone()
+
+        if user and check_password_hash(user[3], password):
+            session['user_id'] = user[0]
+            return redirect(url_for('home'))
+        else:
+            flash('Invalid credentials')
+            return redirect(url_for('login'))
+
+    captcha_text, captcha_image_path = generate_captcha_image()
+    session['captcha_text'] = captcha_text
+    return render_template('login.html', captcha_image_path=captcha_image_path)
+
+@app.route('/verify1/<email>', methods=['GET', 'POST'])
+def verify1(email):
+    if request.method == 'POST':
+        otp = request.form.get('otp')
+        if verify_otp1(email, otp):
+            flash('Email successfully verified!')
+            return redirect(url_for('login'))
+        else:
+            flash('Invalid or expired OTP')
+            return redirect(url_for('verify1', email=email))
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
+    user = cursor.fetchone()
+    
+    if user:
+        valid_until = user[5]
+        try:
+            valid_until = datetime.strptime(valid_until, '%Y-%m-%d %H:%M:%S.%f')
+            remaining_time = valid_until - datetime.now()
+            if remaining_time.total_seconds() <= 0:
+                remaining_time = timedelta(seconds=0)
+        except ValueError:
+            flash('Invalid OTP expiration time in the database!')
+            remaining_time = timedelta(seconds=0)
+    else:
+        flash('User  not found!')
+        remaining_time = timedelta(seconds=0)
+
+    return render_template('verify1.html', email=email, remaining_time=remaining_time)
+def verify_otp1(email, otp):
+    if not email:
+        flash('Email cannot be empty!')
+        return False
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
+    user = cursor.fetchone()
+
+    if user:
+        code = user[4]
+        valid_until = user[5]
+        
+        try:
+            valid_until = datetime.strptime(valid_until, '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            flash('Invalid OTP expiration time in the database!')
+            return False
+
+        if otp == code and datetime.now() <= valid_until:
+            return True
+    return False
+
+@app.route('/verify2/<email>', methods=['GET', 'POST'])
+def verify2(email):
+    if request.method == 'POST':
+        reset_code = request.form['reset_code']
+        new_password = request.form['new_password']
+        confirm_password = request.form['confirm_password']
+
+        if new_password != confirm_password:
+            flash('Passwords do not match.')
+            return redirect(url_for('verify2', email=email))
+
+        if verify_otp(email, new_password, reset_code, reset=True):
+            flash('Password reset successful!')
+            return redirect(url_for('login'))
+        else:
+            flash('Invalid or expired reset code.')
+            return redirect(url_for('verify2', email=email))
+
+    return render_template('verify2.html', email=email)
+def verify_otp(email, pa, otp, reset=False):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
+    user = cursor.fetchone()
+    
+    if user:
+        code = user[4]
+        valid_until_str = user[5]
+        
+        try:
+            valid_until = datetime.strptime(valid_until_str, '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            print(f"Invalid datetime format: {valid_until_str}")
+            return False
+            
+        if otp == code and datetime.now() <= valid_until:
+            if reset:
+                hashed_password = generate_password_hash(pa)
+                cursor.execute('UPDATE users SET password = %s, verification_code = NULL, valid_until = NULL WHERE email = %s', 
+                               (hashed_password, email))
+            else:
+                cursor.execute('UPDATE users SET verification_code = NULL, valid_until = NULL WHERE email = %s', (email,))
+            
+            conn.commit()
+            return True
+
+    return False
